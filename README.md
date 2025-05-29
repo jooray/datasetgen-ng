@@ -82,6 +82,9 @@ poetry run datasetgen text.txt \
   --db existing_dataset.db \
   --config custom_config.json \
   --verbose
+
+# Reprocess previously rejected pairs
+poetry run datasetgen text.txt --phase 3 --reprocess-rejected
 ```
 
 ## Configuration
@@ -156,6 +159,7 @@ Options:
   --output PATH           Output path for dataset (default: dataset.jsonl)
   --db PATH               Database path (default: dataset.db)
   --verbose               Enable verbose logging to stderr
+  --reprocess-rejected    Reprocess previously rejected question-answer pairs in phase 3
   --help                  Show this message and exit.
 ```
 
@@ -180,7 +184,8 @@ CREATE TABLE qa_pairs (
     context TEXT NOT NULL,
     answer TEXT,
     approved INTEGER DEFAULT 0,
-    processed INTEGER DEFAULT 0
+    processed INTEGER DEFAULT 0,
+    rejection_reason TEXT
 );
 ```
 

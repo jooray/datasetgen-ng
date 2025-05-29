@@ -87,40 +87,70 @@ For changes:
             # Additional cleaning for control characters and formatting issues
             cleaned_content = cleaned_content.strip()
 
-            # Remove any control characters that might break JSON parsing (but preserve newlines)
+            # More comprehensive control character removal (preserve newlines in JSON strings)
             import re
-            cleaned_content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', cleaned_content)
 
-            # Try to fix common JSON formatting issues
             # Replace smart quotes with regular quotes
             cleaned_content = cleaned_content.replace('"', '"').replace('"', '"')
             cleaned_content = cleaned_content.replace(''', "'").replace(''', "'")
 
-            parsed_response = json.loads(cleaned_content)
+            # Handle escaped characters in JSON strings properly
+            # First, let's try to parse and handle the JSON more carefully
+            try:
+                # Try parsing with Python's built-in JSON decoder which handles escapes
+                parsed_response = json.loads(cleaned_content)
 
-            if parsed_response.get("status") in ["PASS", "REJECT", "CHANGE"]:
-                # Validate CHANGE response has at least one of question or answer
-                if parsed_response.get("status") == "CHANGE":
-                    if "question" not in parsed_response and "answer" not in parsed_response:
-                        self._log_verbose("CHANGE response missing both question and answer fields")
-                        return {"status": "REJECT", "message": "CHANGE response must include either question or answer field"}
-                return parsed_response
-            else:
-                self._log_verbose(f"Invalid status in response: {parsed_response.get('status')}")
-                return {"status": "REJECT", "message": "Invalid approval response format"}
+                if parsed_response.get("status") in ["PASS", "REJECT", "CHANGE"]:
+                    # Validate CHANGE response has at least one of question or answer
+                    if parsed_response.get("status") == "CHANGE":
+                        if "question" not in parsed_response and "answer" not in parsed_response:
+                            self._log_verbose("CHANGE response missing both question and answer fields")
+                            return {"status": "REJECT", "message": "CHANGE response must include either question or answer field"}
+                    return parsed_response
+                else:
+                    self._log_verbose(f"Invalid status in response: {parsed_response.get('status')}")
+                    return {"status": "REJECT", "message": "Invalid approval response format"}
 
-        except json.JSONDecodeError as e:
-            self._log_verbose(f"JSON decode error: {e}")
-            self._log_verbose(f"Cleaned content: {repr(cleaned_content)}")
+            except json.JSONDecodeError as json_error:
+                self._log_verbose(f"First JSON parse attempt failed: {json_error}")
 
-            # Try to extract status manually as fallback
-            content_upper = response.content.upper()
-            if "PASS" in content_upper and "STATUS" in content_upper:
-                return {"status": "PASS"}
-            elif "REJECT" in content_upper and "STATUS" in content_upper:
-                return {"status": "REJECT", "message": "Could not parse structured response but detected REJECT"}
-            else:
-                return {"status": "REJECT", "message": f"Failed to parse JSON response: {str(e)}"}
+                # Try more aggressive cleaning for malformed JSON
+                # Remove control characters but be more careful about what we remove
+                cleaned_content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', cleaned_content)
+
+                # Try to fix common JSON issues
+                # Replace unescaped newlines in strings with escaped ones
+                # This is tricky - we need to be careful not to break actual JSON structure
+
+                # Try a different approach: extract the JSON structure manually if needed
+                try:
+                    parsed_response = json.loads(cleaned_content)
+
+                    if parsed_response.get("status") in ["PASS", "REJECT", "CHANGE"]:
+                        if parsed_response.get("status") == "CHANGE":
+                            if "question" not in parsed_response and "answer" not in parsed_response:
+                                self._log_verbose("CHANGE response missing both question and answer fields")
+                                return {"status": "REJECT", "message": "CHANGE response must include either question or answer field"}
+                        return parsed_response
+                    else:
+                        self._log_verbose(f"Invalid status in response: {parsed_response.get('status')}")
+                        return {"status": "REJECT", "message": "Invalid approval response format"}
+
+                except json.JSONDecodeError as second_error:
+                    self._log_verbose(f"Second JSON parse attempt failed: {second_error}")
+
+                    # Final fallback: try to extract just the status and create a minimal response
+                    content_upper = response.content.upper()
+                    if '"STATUS": "PASS"' in content_upper or '"STATUS":"PASS"' in content_upper:
+                        return {"status": "PASS"}
+                    elif '"STATUS": "REJECT"' in content_upper or '"STATUS":"REJECT"' in content_upper:
+                        return {"status": "REJECT", "message": "Could not parse structured response but detected REJECT"}
+                    elif '"STATUS": "CHANGE"' in content_upper or '"STATUS":"CHANGE"' in content_upper:
+                        # For CHANGE, we need to be more careful since we need the actual content
+                        # Return a REJECT instead since we can't safely extract the changes
+                        return {"status": "REJECT", "message": "CHANGE response detected but could not parse JSON content safely"}
+                    else:
+                        return {"status": "REJECT", "message": f"Failed to parse JSON response: {str(second_error)}"}
 
         except Exception as e:
             self._log_verbose(f"Error parsing approval response: {e}")
@@ -152,6 +182,9 @@ For changes:
                     result = self._check_single_prompt(conditional_prompt, question, answer)
 
                     if result["status"] != "PASS":
+                        # Add prompt context to rejection reason
+                        if result["status"] == "REJECT" and "message" in result:
+                            result["message"] = f"Conditional prompt {i+1}.{j}: {result['message']}"
                         return result  # Return REJECT or CHANGE immediately
 
             else:
@@ -160,6 +193,9 @@ For changes:
                 result = self._check_single_prompt(prompt_item, question, answer)
 
                 if result["status"] != "PASS":
+                    # Add prompt context to rejection reason
+                    if result["status"] == "REJECT" and "message" in result:
+                        result["message"] = f"Prompt {i+1}: {result['message']}"
                     return result  # Return REJECT or CHANGE immediately
 
         # If all prompts passed, return PASS

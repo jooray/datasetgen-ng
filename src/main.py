@@ -19,6 +19,8 @@ def main():
                        default="dataset.jsonl")
     parser.add_argument("--db", help="Database path", default="dataset.db")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging to stderr")
+    parser.add_argument("--reprocess-rejected", action="store_true",
+                       help="Reprocess previously rejected question-answer pairs in phase 3")
 
     args = parser.parse_args()
 
@@ -98,6 +100,18 @@ def main():
 
     if args.phase in ['3', 'all']:
         print("Phase 3: Checking approvals...")
+
+        # Handle reprocessing of rejected pairs if requested
+        if args.reprocess_rejected:
+            rejected_pairs = db.get_rejected_qa_pairs()
+            if rejected_pairs:
+                print(f"Found {len(rejected_pairs)} rejected pairs to reprocess")
+                question_ids = [pair[0] for pair in rejected_pairs]
+                db.reset_for_reprocessing(question_ids)
+                print(f"Reset {len(question_ids)} rejected pairs for reprocessing")
+            else:
+                print("No rejected pairs found to reprocess")
+
         checker = ApprovalChecker(
             approval_prompts=prompts['approval_prompts'],
             model=config.get_model_name(),
@@ -126,9 +140,10 @@ def main():
                     if args.verbose:
                         print(f"[VERBOSE] Question {question_id} approved", file=sys.stderr)
                 elif result["status"] == "REJECT":
-                    db.update_approval_status(question_id, False)
+                    rejection_reason = result.get('message', 'No reason provided')
+                    db.update_approval_status(question_id, False, rejection_reason)
                     if args.verbose:
-                        print(f"[VERBOSE] Question {question_id} rejected: {result.get('message', 'No reason provided')}", file=sys.stderr)
+                        print(f"[VERBOSE] Question {question_id} rejected: {rejection_reason}", file=sys.stderr)
                 elif result["status"] == "CHANGE":
                     # Handle missing keys gracefully - only update what's provided
                     new_question = result.get("question", question)  # Use original if not provided

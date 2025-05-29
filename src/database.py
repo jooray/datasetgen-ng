@@ -15,7 +15,8 @@ class Database:
                     context TEXT NOT NULL,
                     answer TEXT,
                     approved INTEGER DEFAULT 0,
-                    processed INTEGER DEFAULT 0
+                    processed INTEGER DEFAULT 0,
+                    rejection_reason TEXT
                 )
             ''')
             conn.commit()
@@ -59,11 +60,11 @@ class Database:
             )
             return cursor.fetchall()
 
-    def update_approval_status(self, question_id: int, approved: bool):
+    def update_approval_status(self, question_id: int, approved: bool, rejection_reason: Optional[str] = None):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                'UPDATE qa_pairs SET approved = ?, processed = 1 WHERE id = ?',
-                (1 if approved else 0, question_id)
+                'UPDATE qa_pairs SET approved = ?, processed = 1, rejection_reason = ? WHERE id = ?',
+                (1 if approved else 0, rejection_reason, question_id)
             )
             conn.commit()
 
@@ -89,5 +90,23 @@ class Database:
             conn.execute(
                 "UPDATE qa_pairs SET question = ?, answer = ? WHERE id = ?",
                 (new_question, new_answer, question_id)
+            )
+            conn.commit()
+
+    def get_rejected_qa_pairs(self) -> List[Tuple[int, str, str]]:
+        """Get all rejected question-answer pairs for reprocessing"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                'SELECT id, question, answer FROM qa_pairs WHERE processed = 1 AND approved = 0 AND answer IS NOT NULL AND answer != ""'
+            )
+            return cursor.fetchall()
+
+    def reset_for_reprocessing(self, question_ids: List[int]):
+        """Reset processed and approval status for reprocessing"""
+        with sqlite3.connect(self.db_path) as conn:
+            placeholders = ','.join('?' * len(question_ids))
+            conn.execute(
+                f'UPDATE qa_pairs SET processed = 0, approved = 0, rejection_reason = NULL WHERE id IN ({placeholders})',
+                question_ids
             )
             conn.commit()
