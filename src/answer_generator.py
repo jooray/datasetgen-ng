@@ -3,17 +3,13 @@ from langchain_core.vectorstores import InMemoryVectorStore
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import HumanMessage
 import sys
-from .chat_venice_api import ChatVeniceAPI
 
 class AnswerGenerator:
-    def __init__(self, text: str, prompt: str, model: str, api_key: str, api_base: str, embedding_model: str = "llama3", verbose: bool = False):
+    def __init__(self, text: str, prompt: str, llm, embedding_model: str = "llama3", verbose: bool = False):
         self.text = text
         self.prompt = prompt
-        self.model = model
-        self.api_key = api_key
-        self.api_base = api_base
+        self.llm = llm
         self.verbose = verbose
-        self.llm = ChatVeniceAPI(model=self.model, api_key=self.api_key, base_url=self.api_base)
         self.embeddings = OllamaEmbeddings(model=embedding_model)
         self.vector_store = None
         self._setup_vector_store()
@@ -45,9 +41,13 @@ class AnswerGenerator:
 
         message = HumanMessage(content=full_prompt)
 
-        self._log_verbose(f"Sending answer generation prompt: {full_prompt}")
-        response = self.llm.invoke([message])
-        self._log_verbose(f"Received answer response: {response.content}")
+        try:
+            self._log_verbose(f"Sending answer generation prompt: {full_prompt}")
+            response = self.llm.invoke([message])
+            self._log_verbose(f"Received answer response: {response.content}")
+        except Exception as e:
+            self._log_verbose(f"Answer generation failed after retries: {e}")
+            return None
 
         # Check if the response indicates failure
         if response.content.strip() == "FAIL":

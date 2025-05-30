@@ -3,7 +3,6 @@ from langchain.schema import HumanMessage
 from pydantic import BaseModel, Field
 import sys
 import json
-from .chat_venice_api import ChatVeniceAPI
 
 class PassResponse(BaseModel):
     status: Literal["PASS"] = "PASS"
@@ -19,13 +18,10 @@ class ChangeResponse(BaseModel):
     justification: str = Field(description="Explanation of what was changed and why")
 
 class ApprovalChecker:
-    def __init__(self, approval_prompts: List[Union[str, List[str]]], model: str, api_key: str, api_base: str, verbose: bool = False):
+    def __init__(self, approval_prompts: List[Union[str, List[str]]], llm, verbose: bool = False):
         self.approval_prompts = approval_prompts
-        self.model = model
-        self.api_key = api_key
-        self.api_base = api_base
+        self.llm = llm
         self.verbose = verbose
-        self.llm = ChatVeniceAPI(model=self.model, api_key=self.api_key, base_url=self.api_base)
 
     def _log_verbose(self, message: str):
         if self.verbose:
@@ -36,9 +32,13 @@ class ApprovalChecker:
         full_prompt = f"{prompt}\n\nRespond with only YES or NO.\n\nQuestion: {question}\nAnswer: {answer}"
         message = HumanMessage(content=full_prompt)
 
-        self._log_verbose(f"Sending YES/NO prompt: {full_prompt}")
-        response = self.llm.invoke([message])
-        self._log_verbose(f"Received YES/NO response: {response.content}")
+        try:
+            self._log_verbose(f"Sending YES/NO prompt: {full_prompt}")
+            response = self.llm.invoke([message])
+            self._log_verbose(f"Received YES/NO response: {response.content}")
+        except Exception as e:
+            self._log_verbose(f"YES/NO check failed after retries: {e}")
+            return False
 
         # Check if response contains YES (case insensitive)
         response_text = response.content.strip().upper()
@@ -70,9 +70,13 @@ For changes:
         full_prompt = f"{prompt}\n\n{format_instructions}\n\nQuestion: {question}\nAnswer: {answer}"
         message = HumanMessage(content=full_prompt)
 
-        self._log_verbose(f"Sending approval prompt: {full_prompt}")
-        response = self.llm.invoke([message])
-        self._log_verbose(f"Received approval response: {response.content}")
+        try:
+            self._log_verbose(f"Sending approval prompt: {full_prompt}")
+            response = self.llm.invoke([message])
+            self._log_verbose(f"Received approval response: {response.content}")
+        except Exception as e:
+            self._log_verbose(f"Approval check failed after retries: {e}")
+            return {"status": "REJECT", "message": f"API call failed after retries: {str(e)}"}
 
         try:
             # Clean up the response content by removing markdown code blocks

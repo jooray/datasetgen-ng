@@ -7,6 +7,8 @@ from .question_generator import QuestionGenerator
 from .answer_generator import AnswerGenerator
 from .approval_checker import ApprovalChecker
 from .dataset_exporter import DatasetExporter
+from .chat_venice_api import ChatVeniceAPI
+from openai import InternalServerError, RateLimitError, APITimeoutError, APIConnectionError
 
 def main():
     parser = argparse.ArgumentParser(description="Dataset generator for finetuning")
@@ -39,6 +41,18 @@ def main():
         print("Error: VENICE_API_KEY environment variable not set")
         sys.exit(1)
 
+    # Create LLM instance once with retry configuration
+    base_llm = ChatVeniceAPI(
+        model=config.get_model_name(),
+        api_key=api_key,
+        base_url=config.get_api_base()
+    )
+    llm = base_llm.with_retry(
+        retry_if_exception_type=(InternalServerError, RateLimitError, APITimeoutError, APIConnectionError),
+        wait_exponential_jitter=True,
+        stop_after_attempt=3
+    )
+
     prompts = config.get_prompts()
 
     if args.phase in ['1', 'all']:
@@ -46,9 +60,7 @@ def main():
         generator = QuestionGenerator(
             text=text,
             prompt=prompts['question_generation'],
-            model=config.get_model_name(),
-            api_key=api_key,
-            api_base=config.get_api_base(),
+            llm=llm,
             chunk_size=config.get_question_chunk_size(),
             verbose=args.verbose
         )
@@ -73,9 +85,7 @@ def main():
         answer_gen = AnswerGenerator(
             text=text,
             prompt=prompts['answer_generation'],
-            model=config.get_model_name(),
-            api_key=api_key,
-            api_base=config.get_api_base(),
+            llm=llm,
             embedding_model=config.get_embedding_model(),
             verbose=args.verbose
         )
@@ -114,9 +124,7 @@ def main():
 
         checker = ApprovalChecker(
             approval_prompts=prompts['approval_prompts'],
-            model=config.get_model_name(),
-            api_key=api_key,
-            api_base=config.get_api_base(),
+            llm=llm,
             verbose=args.verbose
         )
 

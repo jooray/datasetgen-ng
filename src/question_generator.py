@@ -5,21 +5,17 @@ from langchain_core.output_parsers import JsonOutputParser
 from pydantic import RootModel
 import sys
 import json
-from .chat_venice_api import ChatVeniceAPI
 
 class QuestionList(RootModel[List[str]]):
     root: List[str]
 
 class QuestionGenerator:
-    def __init__(self, text: str, prompt: str, model: str, api_key: str, api_base: str, chunk_size: int = 10000, verbose: bool = False):
+    def __init__(self, text: str, prompt: str, llm, chunk_size: int = 10000, verbose: bool = False):
         self.text = text
         self.prompt = prompt
-        self.model = model
-        self.api_key = api_key
-        self.api_base = api_base
+        self.llm = llm
         self.chunk_size = chunk_size
         self.verbose = verbose
-        self.llm = ChatVeniceAPI(model=self.model, api_key=self.api_key, base_url=self.api_base)
 
     def _log_verbose(self, message: str):
         if self.verbose:
@@ -38,9 +34,13 @@ class QuestionGenerator:
 
         message = HumanMessage(content=full_prompt)
 
-        self._log_verbose(f"Sending prompt to model: {full_prompt}")
-        response = self.llm.invoke([message])
-        self._log_verbose(f"Received response: {response.content}")
+        try:
+            self._log_verbose(f"Sending prompt to model: {full_prompt}")
+            response = self.llm.invoke([message])
+            self._log_verbose(f"Received response: {response.content}")
+        except Exception as e:
+            self._log_verbose(f"Question generation failed after retries: {e}")
+            return []
 
         try:
             # Clean up the response content by removing markdown code blocks
