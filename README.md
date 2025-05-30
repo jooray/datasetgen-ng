@@ -236,6 +236,13 @@ CREATE TABLE imported_datasets (
 );
 ```
 
+## Parallel processing
+
+It is safe to run one of each Phase 1, Phase 2 and Phase 3 processes at the same time, after
+you add all the datasets to the vector store (addcontext phase).
+
+You can also run multiple Phase 1 processes at the same time with different datasets.
+
 ## Support and value4value
 
 If you like this project, I would appreciate if you contributed time, talent or treasure.
