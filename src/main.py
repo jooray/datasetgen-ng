@@ -12,26 +12,38 @@ from openai import InternalServerError, RateLimitError, APITimeoutError, APIConn
 
 def main():
     parser = argparse.ArgumentParser(description="Dataset generator for finetuning")
-    parser.add_argument("text_path", help="Path to the text file")
+    parser.add_argument("--dataset", help="Path to the text file (required for phases 1, addcontext, all)")
     parser.add_argument("--config", help="Path to config file",
                        default=os.path.expanduser("~/.datasetgen.json"))
-    parser.add_argument("--phase", choices=['1', '2', '3', '4', 'all'], default='all',
-                       help="Which phase to run (1=questions, 2=answers, 3=approval, 4=export)")
+    parser.add_argument("--phase", choices=['1', '2', '3', '4', 'addcontext', 'all'], default='all',
+                       help="Which phase to run (1=questions, 2=answers, 3=approval, 4=export, addcontext=import to vector store)")
     parser.add_argument("--output", help="Output path for dataset (phase 4)",
                        default="dataset.jsonl")
     parser.add_argument("--db", help="Database path", default="dataset.db")
+    parser.add_argument("--vector-store", help="Vector store path", default="vector_store")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging to stderr")
     parser.add_argument("--reprocess-rejected", action="store_true",
                        help="Reprocess previously rejected question-answer pairs in phase 3")
+    parser.add_argument("--with-context", action="store_true",
+                       help="Include context information during approval checking (phase 3)")
 
     args = parser.parse_args()
 
-    if not os.path.exists(args.text_path):
-        print(f"Error: Text file '{args.text_path}' not found")
-        sys.exit(1)
+    # Validate dataset argument for phases that need it
+    phases_needing_dataset = ['1', 'addcontext', 'all']
+    if args.phase in phases_needing_dataset:
+        if not args.dataset:
+            print(f"Error: --dataset is required for phase {args.phase}")
+            sys.exit(1)
+        if not os.path.exists(args.dataset):
+            print(f"Error: Dataset file '{args.dataset}' not found")
+            sys.exit(1)
 
-    with open(args.text_path, 'r') as f:
-        text = f.read()
+    # Read text file only if needed
+    text = None
+    if args.dataset and os.path.exists(args.dataset):
+        with open(args.dataset, 'r') as f:
+            text = f.read()
 
     config = Config(args.config)
     db = Database(args.db)
@@ -55,8 +67,30 @@ def main():
 
     prompts = config.get_prompts()
 
+    # Initialize answer generator for vector store operations (only if we have text or need vector store)
+    answer_gen = None
+    if text or args.phase in ['2', '3'] or (args.phase == 'all'):
+        answer_gen = AnswerGenerator(
+            text=text or "",  # Empty string if no text provided
+            prompt=prompts['answer_generation'],
+            llm=llm,
+            embedding_model=config.get_embedding_model(),
+            verbose=args.verbose,
+            vector_store_path=args.vector_store
+        )
+
+    if args.phase in ['addcontext']:
+        print("Phase addcontext: Importing text to vector store...")
+        answer_gen.load_or_create_vector_store(db)
+        print("Text imported to vector store")
+        return
+
     if args.phase in ['1', 'all']:
         print("Phase 1: Generating questions...")
+
+        # Ensure vector store is set up for RAG
+        answer_gen.load_or_create_vector_store(db)
+
         generator = QuestionGenerator(
             text=text,
             prompt=prompts['question_generation'],
@@ -82,13 +116,10 @@ def main():
 
     if args.phase in ['2', 'all']:
         print("Phase 2: Generating answers...")
-        answer_gen = AnswerGenerator(
-            text=text,
-            prompt=prompts['answer_generation'],
-            llm=llm,
-            embedding_model=config.get_embedding_model(),
-            verbose=args.verbose
-        )
+
+        # Ensure vector store is loaded (may not have text for phase 2 only)
+        if not answer_gen.vector_store and os.path.exists(args.vector_store):
+            answer_gen.load_existing_vector_store()
 
         unanswered = db.get_unanswered_questions()
         total_questions = len(unanswered)
@@ -122,16 +153,23 @@ def main():
             else:
                 print("No rejected pairs found to reprocess")
 
+        # Load vector store if with-context is enabled and we need it for similarity search
+        if args.with_context and answer_gen and not answer_gen.vector_store and os.path.exists(args.vector_store):
+            answer_gen.load_existing_vector_store()
+
         checker = ApprovalChecker(
             approval_prompts=prompts['approval_prompts'],
             llm=llm,
-            verbose=args.verbose
+            verbose=args.verbose,
+            vector_store=answer_gen.vector_store if args.with_context and answer_gen else None
         )
 
         # Loop until all pairs are processed (handle CHANGE status that creates new unprocessed pairs)
         iteration = 1
         while True:
+            # Get unprocessed pairs (always includes context)
             unprocessed = db.get_unprocessed_qa_pairs()
+
             if not unprocessed:
                 break
 
@@ -139,9 +177,13 @@ def main():
             print(f"Approval iteration {iteration}: Found {total_pairs} unprocessed question-answer pairs")
 
             changes_made = 0
-            for i, (question_id, question, answer) in enumerate(unprocessed, 1):
+            for i, (question_id, question, answer, context) in enumerate(unprocessed, 1):
                 print(f"Processing approval {i}/{total_pairs}...")
-                result = checker.check_approval(question, answer)
+
+                if args.with_context:
+                    result = checker.check_approval(question, answer, use_context=True, context=context)
+                else:
+                    result = checker.check_approval(question, answer, use_context=False)
 
                 if result["status"] == "PASS":
                     db.update_approval_status(question_id, True)

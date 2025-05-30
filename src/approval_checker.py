@@ -18,10 +18,11 @@ class ChangeResponse(BaseModel):
     justification: str = Field(description="Explanation of what was changed and why")
 
 class ApprovalChecker:
-    def __init__(self, approval_prompts: List[Union[str, List[str]]], llm, verbose: bool = False):
+    def __init__(self, approval_prompts: List[Union[str, List[str]]], llm, verbose: bool = False, vector_store=None):
         self.approval_prompts = approval_prompts
         self.llm = llm
         self.verbose = verbose
+        self.vector_store = vector_store
 
     def _log_verbose(self, message: str):
         if self.verbose:
@@ -44,7 +45,15 @@ class ApprovalChecker:
         response_text = response.content.strip().upper()
         return "YES" in response_text
 
-    def _check_single_prompt(self, prompt: str, question: str, answer: str) -> dict:
+    def _get_additional_context(self, question: str, k: int = 3) -> str:
+        """Get additional context from vector store if available"""
+        if not self.vector_store:
+            return ""
+
+        docs = self.vector_store.similarity_search(question, k=k)
+        return "\n\n".join([doc.page_content for doc in docs])
+
+    def _check_single_prompt(self, prompt: str, question: str, answer: str, use_context: bool = False, context: Optional[str] = None) -> dict:
         """Check a single approval prompt and return the structured response"""
         format_instructions = """Return your response as a JSON object with one of these formats:
 
@@ -67,11 +76,25 @@ For changes:
   "justification": "Explanation of what was changed and why"
 }"""
 
-        full_prompt = f"{prompt}\n\n{format_instructions}\n\nQuestion: {question}\nAnswer: {answer}"
+        # Build prompt with optional context
+        if use_context and context:
+            additional_context = ""
+            if self.vector_store:
+                additional_context = self._get_additional_context(question)
+                if additional_context:
+                    additional_context = f"\n\nAdditional Context from Vector Store:\n{additional_context}"
+
+            full_prompt = f"{prompt}\n\n{format_instructions}\n\nOriginal Context:\n{context}{additional_context}\n\nQuestion: {question}\nAnswer: {answer}"
+        else:
+            full_prompt = f"{prompt}\n\n{format_instructions}\n\nQuestion: {question}\nAnswer: {answer}"
+
         message = HumanMessage(content=full_prompt)
 
         try:
-            self._log_verbose(f"Sending approval prompt: {full_prompt}")
+            if use_context:
+                self._log_verbose(f"Sending approval prompt with context: {full_prompt}")
+            else:
+                self._log_verbose(f"Sending approval prompt: {full_prompt}")
             response = self.llm.invoke([message])
             self._log_verbose(f"Received approval response: {response.content}")
         except Exception as e:
@@ -161,7 +184,8 @@ For changes:
             self._log_verbose(f"Raw response content: {response.content}")
             return {"status": "REJECT", "message": f"Failed to parse approval response: {str(e)}"}
 
-    def check_approval(self, question: str, answer: str) -> dict:
+    def check_approval(self, question: str, answer: str, use_context: bool = False, context: Optional[str] = None) -> dict:
+        """Check approval with optional context information"""
         for i, prompt_item in enumerate(self.approval_prompts):
             if isinstance(prompt_item, list):
                 # Conditional prompt array
@@ -183,7 +207,7 @@ For changes:
                 # Process remaining prompts in the array
                 for j, conditional_prompt in enumerate(prompt_item[1:], 1):
                     self._log_verbose(f"Processing conditional prompt {i+1}.{j}")
-                    result = self._check_single_prompt(conditional_prompt, question, answer)
+                    result = self._check_single_prompt(conditional_prompt, question, answer, use_context, context)
 
                     if result["status"] != "PASS":
                         # Add prompt context to rejection reason
@@ -194,7 +218,7 @@ For changes:
             else:
                 # Regular single prompt
                 self._log_verbose(f"Processing single prompt {i+1}")
-                result = self._check_single_prompt(prompt_item, question, answer)
+                result = self._check_single_prompt(prompt_item, question, answer, use_context, context)
 
                 if result["status"] != "PASS":
                     # Add prompt context to rejection reason

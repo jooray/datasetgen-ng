@@ -1,13 +1,17 @@
 # Dataset Generator NG
 
-AI-powered dataset generator for creating question-answer pairs from text files for finetuning purposes. This tool processes text documents and generates structured datasets through a multi-phase approach.
+AI-powered dataset generator for creating question-answer pairs from text files for finetuning purposes. This tool processes text documents and generates structured datasets through a multi-phase approach with FAISS-powered vector storage for improved RAG performance.
 
 ## Features
 
-- **Phase 1**: Generate meaningful questions from text chunks
-- **Phase 2**: Generate answers using RAG (Retrieval-Augmented Generation)
+- **Phase 1**: Generate meaningful questions from text chunks and set up FAISS vector store
+- **Phase 2**: Generate answers using RAG (Retrieval-Augmented Generation) with FAISS
 - **Phase 3**: Quality approval checking with configurable prompts
 - **Phase 4**: Export approved pairs to training formats (JSONL)
+- **Phase addcontext**: Import text to FAISS vector store without generating questions
+- **Duplicate prevention**: Automatic detection and prevention of re-importing the same text
+- **Persistent vector storage**: FAISS vector stores are saved and reused across runs
+- **Context-aware approval**: Optional context inclusion during approval checking
 - **Verbose logging**: Detailed logging of all API interactions
 
 ## Installation
@@ -41,6 +45,7 @@ AI-powered dataset generator for creating question-answer pairs from text files 
    ```bash
    # Install Ollama (visit https://ollama.ai for instructions)
    ollama pull nomic-embed-text
+   ollama pull llama3  # Default embedding model
    ```
 
 5. **Create configuration file (optional):**
@@ -55,36 +60,49 @@ AI-powered dataset generator for creating question-answer pairs from text files 
 
 ```bash
 # Run all phases
-poetry run datasetgen path/to/text.txt
+poetry run datasetgen --dataset path/to/text.txt
 
 # Run specific phases
-poetry run datasetgen path/to/text.txt --phase 1  # Generate questions
-poetry run datasetgen path/to/text.txt --phase 2  # Generate answers
-poetry run datasetgen path/to/text.txt --phase 3  # Check approvals
-poetry run datasetgen path/to/text.txt --phase 4  # Export dataset
+poetry run datasetgen --dataset path/to/text.txt --phase 1  # Generate questions + setup vector store
+poetry run datasetgen --phase 2  # Generate answers using FAISS RAG (no dataset needed)
+poetry run datasetgen --phase 3  # Check approvals (no dataset needed)
+poetry run datasetgen --phase 4  # Export dataset (no dataset needed)
+poetry run datasetgen --dataset path/to/text.txt --phase addcontext  # Only import to vector store
 
-# Custom output and database paths
-poetry run datasetgen text.txt --output my_dataset.jsonl --db my_dataset.db
+# Custom output, database, and vector store paths
+poetry run datasetgen --dataset text.txt --output my_dataset.jsonl --db my_dataset.db --vector-store my_vector_store
 
 # Enable verbose logging to see all API interactions
-poetry run datasetgen text.txt --verbose
+poetry run datasetgen --dataset text.txt --verbose
+
+# Phase 3 with context information for better approval checking
+poetry run datasetgen --phase 3 --with-context
 ```
 
 ### Advanced Usage
 
 ```bash
 # Use custom config file
-poetry run datasetgen text.txt --config /path/to/custom-config.json
+poetry run datasetgen --dataset text.txt --config /path/to/custom-config.json
 
 # Process specific phases with custom paths and verbose output
-poetry run datasetgen text.txt \
-  --phase 2 \
+poetry run datasetgen --phase 2 \
   --db existing_dataset.db \
+  --vector-store existing_vector_store \
   --config custom_config.json \
   --verbose
 
-# Reprocess previously rejected pairs
-poetry run datasetgen text.txt --phase 3 --reprocess-rejected
+# Import additional context to existing vector store
+poetry run datasetgen --dataset additional_text.txt \
+  --phase addcontext \
+  --vector-store existing_vector_store \
+  --db existing_dataset.db
+
+# Reprocess previously rejected pairs with context
+poetry run datasetgen --phase 3 --reprocess-rejected --with-context
+
+# Context-aware approval checking
+poetry run datasetgen --phase 3 --with-context --verbose
 ```
 
 ## Configuration
@@ -123,59 +141,82 @@ The tool uses a JSON configuration file to customize behavior. By default, it lo
 }
 ```
 
+## Command Line Options
+
+```
+Usage: datasetgen [OPTIONS]
+
+Options:
+  --dataset PATH              Path to input text file (required for phases 1, addcontext, all)
+  --config PATH               Path to custom configuration file
+  --phase {1,2,3,4,addcontext,all}  Which phase to run (default: all)
+  --output PATH               Output path for dataset (default: dataset.jsonl)
+  --db PATH                   Database path (default: dataset.db)
+  --vector-store PATH         Vector store path (default: vector_store)
+  --verbose                   Enable verbose logging to stderr
+  --reprocess-rejected        Reprocess previously rejected question-answer pairs in phase 3
+  --with-context              Include context information during approval checking (phase 3)
+  --help                      Show this message and exit.
+```
+
+### Phase-Specific Requirements
+
+- **Phases 1, addcontext, all**: Require `--dataset` argument with path to text file
+- **Phases 2, 3, 4**: Work with existing database and vector store, no dataset file needed
+- **Phase 3 with --with-context**: Uses both database context and vector store for enhanced approval checking
+
 ## Workflow
 
-### Phase 1: Question Generation
+### Phase addcontext: Vector Store Import
+- Imports text into FAISS vector store for later RAG operations
+- Checks for duplicates using text hash to avoid re-importing same content
+- Saves persistent FAISS index to disk for reuse
+
+### Phase 1: Question Generation + Vector Store Setup
 - Splits input text into ~10k character chunks
+- Sets up FAISS vector store with duplicate detection
 - Generates multiple questions per chunk using structured output
 - Stores questions with their source context in SQLite database
 
-### Phase 2: Answer Generation
-- Creates vector store from input text for RAG
-- For each unanswered question, retrieves relevant context
+### Phase 2: Answer Generation with FAISS RAG
+- Loads or reuses existing FAISS vector store
+- For each unanswered question, retrieves relevant context using FAISS similarity search
 - Generates answers using both original context and retrieved context
 - Stores answers in database
 
 ### Phase 3: Approval Checking
 - Runs configurable approval prompts on each question-answer pair
 - Questions must pass ALL approval prompts to be approved
+- **With --with-context**: Includes original context and additional vector store context in approval prompts
+- **Without --with-context**: Uses only question-answer pairs (original behavior)
 - Updates approval and processing status in database
 
 ### Phase 4: Dataset Export
 - Exports all approved question-answer pairs to specified format
 - Currently supports JSONL with "question" and "answer" keys
 
-## Command Line Options
+## Vector Store and Duplicate Prevention
 
-```
-Usage: datasetgen [OPTIONS] TEXT_PATH
+The tool uses FAISS for efficient similarity search and implements automatic duplicate prevention:
 
-Arguments:
-  TEXT_PATH  Path to the input text file  [required]
-
-Options:
-  --config PATH            Path to custom configuration file
-  --phase {1,2,3,4,all}   Which phase to run (default: all)
-  --output PATH           Output path for dataset (default: dataset.jsonl)
-  --db PATH               Database path (default: dataset.db)
-  --verbose               Enable verbose logging to stderr
-  --reprocess-rejected    Reprocess previously rejected question-answer pairs in phase 3
-  --help                  Show this message and exit.
-```
+- **Text Hashing**: Each input text is hashed (SHA-256) for duplicate detection
+- **Import Tracking**: Database tracks which text hashes have been imported
+- **Persistent Storage**: FAISS indices are saved to disk and reused across runs
+- **Automatic Deduplication**: Same text content is never imported twice
 
 ## Verbose Logging
 
-Use the `--verbose` flag to see detailed logging of all API interactions:
+Use the `--verbose` flag to see detailed logging of all API interactions and vector store operations:
 
 ```bash
 poetry run datasetgen text.txt --verbose 2> debug.log
 ```
 
-This will log all prompts sent to the API and responses received, helping with debugging and prompt optimization.
+This will log all prompts sent to the API, responses received, and vector store operations, helping with debugging and prompt optimization.
 
 ## Database Schema
 
-The tool uses SQLite to track progress:
+The tool uses SQLite to track progress and imported datasets:
 
 ```sql
 CREATE TABLE qa_pairs (
@@ -186,6 +227,12 @@ CREATE TABLE qa_pairs (
     approved INTEGER DEFAULT 0,
     processed INTEGER DEFAULT 0,
     rejection_reason TEXT
+);
+
+CREATE TABLE imported_datasets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text_hash TEXT UNIQUE NOT NULL,
+    imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
