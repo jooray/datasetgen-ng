@@ -13,6 +13,7 @@ AI-powered dataset generator for creating question-answer pairs from text files 
 - **Persistent vector storage**: FAISS vector stores are saved and reused across runs
 - **Context-aware approval**: Optional context inclusion during approval checking
 - **Verbose logging**: Detailed logging of all API interactions
+- **Parallel processing**: Multi-threaded processing for phases 1, 2, and 3 for improved performance
 
 ## Installation
 
@@ -62,35 +63,39 @@ AI-powered dataset generator for creating question-answer pairs from text files 
 # Run all phases
 poetry run datasetgen --dataset path/to/text.txt
 
-# Run specific phases
-poetry run datasetgen --dataset path/to/text.txt --phase 1  # Generate questions + setup vector store
-poetry run datasetgen --phase 2  # Generate answers using FAISS RAG (no dataset needed)
-poetry run datasetgen --phase 3  # Check approvals (no dataset needed)
-poetry run datasetgen --phase 4  # Export dataset (no dataset needed)
+# Run with parallel processing (4 threads)
+poetry run datasetgen --dataset path/to/text.txt --threads 4
+
+# Run specific phases with threading
+poetry run datasetgen --dataset path/to/text.txt --phase 1 --threads 2  # Generate questions + setup vector store
+poetry run datasetgen --phase 2 --threads 3  # Generate answers using FAISS RAG (no dataset needed)
+poetry run datasetgen --phase 3 --threads 2  # Check approvals (no dataset needed)
+poetry run datasetgen --phase 4  # Export dataset (no threading needed)
 poetry run datasetgen --dataset path/to/text.txt --phase addcontext  # Only import to vector store
 
-# Custom output, database, and vector store paths
-poetry run datasetgen --dataset text.txt --output my_dataset.jsonl --db my_dataset.db --vector-store my_vector_store
+# Custom output, database, and vector store paths with threading
+poetry run datasetgen --dataset text.txt --output my_dataset.jsonl --db my_dataset.db --vector-store my_vector_store --threads 4
 
-# Enable verbose logging to see all API interactions
-poetry run datasetgen --dataset text.txt --verbose
+# Enable verbose logging to see all API interactions with parallel processing
+poetry run datasetgen --dataset text.txt --verbose --threads 2
 
-# Phase 3 with context information for better approval checking
-poetry run datasetgen --phase 3 --with-context
+# Phase 3 with context information for better approval checking (parallel)
+poetry run datasetgen --phase 3 --with-context --threads 3
 ```
 
 ### Advanced Usage
 
 ```bash
-# Use custom config file
-poetry run datasetgen --dataset text.txt --config /path/to/custom-config.json
+# Use custom config file with parallel processing
+poetry run datasetgen --dataset text.txt --config /path/to/custom-config.json --threads 4
 
-# Process specific phases with custom paths and verbose output
+# Process specific phases with custom paths, verbose output, and threading
 poetry run datasetgen --phase 2 \
   --db existing_dataset.db \
   --vector-store existing_vector_store \
   --config custom_config.json \
-  --verbose
+  --verbose \
+  --threads 3
 
 # Import additional context to existing vector store
 poetry run datasetgen --dataset additional_text.txt \
@@ -98,11 +103,11 @@ poetry run datasetgen --dataset additional_text.txt \
   --vector-store existing_vector_store \
   --db existing_dataset.db
 
-# Reprocess previously rejected pairs with context
-poetry run datasetgen --phase 3 --reprocess-rejected --with-context
+# Reprocess previously rejected pairs with context and parallel processing
+poetry run datasetgen --phase 3 --reprocess-rejected --with-context --threads 2
 
-# Context-aware approval checking
-poetry run datasetgen --phase 3 --with-context --verbose
+# Context-aware approval checking with parallel processing
+poetry run datasetgen --phase 3 --with-context --verbose --threads 4
 ```
 
 ## Configuration
@@ -156,6 +161,7 @@ Options:
   --verbose                   Enable verbose logging to stderr
   --reprocess-rejected        Reprocess previously rejected question-answer pairs in phase 3
   --with-context              Include context information during approval checking (phase 3)
+  --threads INTEGER           Number of threads for parallel processing (default: 1)
   --help                      Show this message and exit.
 ```
 
@@ -164,6 +170,7 @@ Options:
 - **Phases 1, addcontext, all**: Require `--dataset` argument with path to text file
 - **Phases 2, 3, 4**: Work with existing database and vector store, no dataset file needed
 - **Phase 3 with --with-context**: Uses both database context and vector store for enhanced approval checking
+- **Phases 1, 2, 3**: Support parallel processing with `--threads` parameter for improved performance
 
 ## Workflow
 
@@ -238,10 +245,42 @@ CREATE TABLE imported_datasets (
 
 ## Parallel processing
 
+Phases 1, 2, and 3 support parallel processing using the `--threads` parameter:
+
+- **Phase 1**: Processes text chunks in parallel for question generation
+- **Phase 2**: Processes questions in parallel for answer generation  
+- **Phase 3**: Processes question-answer pairs in parallel for approval checking
+
+Using more threads can significantly speed up processing, especially for large datasets. However, be mindful of:
+- API rate limits (Venice AI)
+- System resources (CPU and memory)
+- Database connection limits
+
+### Performance Considerations
+
+- **Recommended thread counts**: Start with 2-4 threads and adjust based on your system and API limits
+- **Memory usage**: Each thread maintains its own context, so more threads = more memory usage
+- **API rate limits**: Venice AI may have rate limits that could affect performance with too many concurrent requests
+- **Database locking**: SQLite handles concurrent access well, but extremely high thread counts may cause contention
+
+### Safe Concurrent Operations
+
 It is safe to run one of each Phase 1, Phase 2 and Phase 3 processes at the same time, after
 you add all the datasets to the vector store (addcontext phase).
 
 You can also run multiple Phase 1 processes at the same time with different datasets.
+
+Example workflow for maximum parallelism:
+```bash
+# First, import all datasets to vector store
+poetry run datasetgen --dataset dataset1.txt --phase addcontext --vector-store shared_store --db shared.db
+poetry run datasetgen --dataset dataset2.txt --phase addcontext --vector-store shared_store --db shared.db
+
+# Then run different phases in parallel (in separate terminals)
+poetry run datasetgen --dataset dataset1.txt --phase 1 --threads 2 --vector-store shared_store --db shared.db
+poetry run datasetgen --phase 2 --threads 4 --vector-store shared_store --db shared.db
+poetry run datasetgen --phase 3 --threads 3 --vector-store shared_store --db shared.db
+```
 
 ## Support and value4value
 

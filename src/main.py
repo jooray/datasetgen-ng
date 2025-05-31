@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .config import Config
 from .database import Database
 from .question_generator import QuestionGenerator
@@ -9,6 +10,72 @@ from .approval_checker import ApprovalChecker
 from .dataset_exporter import DatasetExporter
 from .chat_venice_api import ChatVeniceAPI
 from openai import InternalServerError, RateLimitError, APITimeoutError, APIConnectionError
+
+def process_chunk_questions(args):
+    """Helper function for chunk processing in phase 1"""
+    chunk, chunk_index, total_chunks, generator, db, verbose = args
+    if verbose:
+        print(f"[VERBOSE] Processing chunk {chunk_index}/{total_chunks}...", file=sys.stderr)
+
+    questions = generator.generate_questions_for_chunk(chunk)
+    question_count = 0
+    for question in questions:
+        db.insert_question(question, chunk)
+        question_count += 1
+
+    if verbose:
+        print(f"[VERBOSE] Generated {len(questions)} questions from chunk {chunk_index}", file=sys.stderr)
+
+    return question_count
+
+def process_question_answer(args):
+    """Helper function for answer generation in phase 2"""
+    question_id, question, context, answer_gen, db, verbose = args
+    if verbose:
+        print(f"[VERBOSE] Processing question {question_id}...", file=sys.stderr)
+
+    answer = answer_gen.generate_answer(question, context)
+    if answer is None:
+        db.mark_answer_failed(question_id)
+        if verbose:
+            print(f"[VERBOSE] Answer generation failed for question {question_id}", file=sys.stderr)
+        return False
+    else:
+        db.update_answer(question_id, answer)
+        if verbose:
+            print(f"[VERBOSE] Successfully generated answer for question {question_id}", file=sys.stderr)
+        return True
+
+def process_approval_check(args):
+    """Helper function for approval checking in phase 3"""
+    question_id, question, answer, context, checker, db, with_context, verbose = args
+    if verbose:
+        print(f"[VERBOSE] Processing approval for question {question_id}...", file=sys.stderr)
+
+    if with_context:
+        result = checker.check_approval(question, answer, use_context=True, context=context)
+    else:
+        result = checker.check_approval(question, answer, use_context=False)
+
+    if result["status"] == "PASS":
+        db.update_approval_status(question_id, True)
+        if verbose:
+            print(f"[VERBOSE] Question {question_id} approved", file=sys.stderr)
+        return {"status": "PASS", "question_id": question_id}
+    elif result["status"] == "REJECT":
+        rejection_reason = result.get('message', 'No reason provided')
+        db.update_approval_status(question_id, False, rejection_reason)
+        if verbose:
+            print(f"[VERBOSE] Question {question_id} rejected: {rejection_reason}", file=sys.stderr)
+        return {"status": "REJECT", "question_id": question_id}
+    elif result["status"] == "CHANGE":
+        new_question = result.get("question", question)
+        new_answer = result.get("answer", answer)
+        db.update_question_and_answer(question_id, new_question, new_answer)
+        db.mark_as_unprocessed(question_id)
+        if verbose:
+            print(f"[VERBOSE] Question {question_id} changed: {result.get('justification', 'No justification provided')}", file=sys.stderr)
+        return {"status": "CHANGE", "question_id": question_id}
 
 def main():
     parser = argparse.ArgumentParser(description="Dataset generator for finetuning")
@@ -26,6 +93,8 @@ def main():
                        help="Reprocess previously rejected question-answer pairs in phase 3")
     parser.add_argument("--with-context", action="store_true",
                        help="Include context information during approval checking (phase 3)")
+    parser.add_argument("--threads", type=int, default=1,
+                       help="Number of threads for parallel processing (default: 1)")
 
     args = parser.parse_args()
 
@@ -104,14 +173,37 @@ def main():
         total_questions = 0
         print(f"Found {total_chunks} text chunks to process")
 
-        for i, chunk in enumerate(chunks, 1):
-            print(f"Processing chunk {i}/{total_chunks}...")
-            questions = generator.generate_questions_for_chunk(chunk)
-            for question in questions:
-                db.insert_question(question, chunk)
-                total_questions += 1
-            if args.verbose:
-                print(f"[VERBOSE] Generated {len(questions)} questions from chunk {i}", file=sys.stderr)
+        # Prepare arguments for processing
+        chunk_args = [
+            (chunk, i + 1, total_chunks, generator, db, args.verbose)
+            for i, chunk in enumerate(chunks)
+        ]
+
+        if args.threads > 1:
+            print(f"Processing chunks in parallel with {args.threads} threads...")
+
+            with ThreadPoolExecutor(max_workers=args.threads) as executor:
+                future_to_chunk = {executor.submit(process_chunk_questions, arg): arg[1] for arg in chunk_args}
+
+                for future in as_completed(future_to_chunk):
+                    chunk_index = future_to_chunk[future]
+                    try:
+                        question_count = future.result()
+                        total_questions += question_count
+                        print(f"Completed chunk {chunk_index}/{total_chunks}")
+                    except Exception as exc:
+                        print(f"Chunk {chunk_index} generated an exception: {exc}")
+        else:
+            # Sequential processing using the same helper function
+            for arg in chunk_args:
+                chunk_index = arg[1]
+                print(f"Processing chunk {chunk_index}/{total_chunks}...")
+                try:
+                    question_count = process_chunk_questions(arg)
+                    total_questions += question_count
+                except Exception as exc:
+                    print(f"Chunk {chunk_index} generated an exception: {exc}")
+
         print(f"Generated {total_questions} questions from {total_chunks} chunks")
 
     if args.phase in ['2', 'all']:
@@ -125,18 +217,37 @@ def main():
         total_questions = len(unanswered)
         print(f"Found {total_questions} unanswered questions")
 
-        for i, (question_id, question, context) in enumerate(unanswered, 1):
-            print(f"Processing question {i}/{total_questions}...")
-            answer = answer_gen.generate_answer(question, context)
-            if answer is None:
-                # Answer generation failed
-                db.mark_answer_failed(question_id)
-                if args.verbose:
-                    print(f"[VERBOSE] Answer generation failed for question {question_id}", file=sys.stderr)
-            else:
-                db.update_answer(question_id, answer)
-                if args.verbose:
-                    print(f"[VERBOSE] Successfully generated answer for question {question_id}", file=sys.stderr)
+        # Prepare arguments for processing
+        answer_args = [
+            (question_id, question, context, answer_gen, db, args.verbose)
+            for question_id, question, context in unanswered
+        ]
+
+        if args.threads > 1:
+            print(f"Processing answers in parallel with {args.threads} threads...")
+
+            completed_count = 0
+            with ThreadPoolExecutor(max_workers=args.threads) as executor:
+                future_to_question = {executor.submit(process_question_answer, arg): arg[0] for arg in answer_args}
+
+                for future in as_completed(future_to_question):
+                    question_id = future_to_question[future]
+                    try:
+                        success = future.result()
+                        completed_count += 1
+                        print(f"Processed question {completed_count}/{total_questions}")
+                    except Exception as exc:
+                        print(f"Question {question_id} generated an exception: {exc}")
+        else:
+            # Sequential processing using the same helper function
+            for i, arg in enumerate(answer_args, 1):
+                question_id = arg[0]
+                print(f"Processing question {i}/{total_questions}...")
+                try:
+                    process_question_answer(arg)
+                except Exception as exc:
+                    print(f"Question {question_id} generated an exception: {exc}")
+
         print(f"Completed answer generation for {total_questions} questions")
 
     if args.phase in ['3', 'all']:
@@ -167,7 +278,6 @@ def main():
         # Loop until all pairs are processed (handle CHANGE status that creates new unprocessed pairs)
         iteration = 1
         while True:
-            # Get unprocessed pairs (always includes context)
             unprocessed = db.get_unprocessed_qa_pairs()
 
             if not unprocessed:
@@ -176,36 +286,41 @@ def main():
             total_pairs = len(unprocessed)
             print(f"Approval iteration {iteration}: Found {total_pairs} unprocessed question-answer pairs")
 
+            # Prepare arguments for processing
+            approval_args = [
+                (question_id, question, answer, context, checker, db, args.with_context, args.verbose)
+                for question_id, question, answer, context in unprocessed
+            ]
+
             changes_made = 0
-            for i, (question_id, question, answer, context) in enumerate(unprocessed, 1):
-                print(f"Processing approval {i}/{total_pairs}...")
+            if args.threads > 1:
+                print(f"Processing approvals in parallel with {args.threads} threads...")
 
-                if args.with_context:
-                    result = checker.check_approval(question, answer, use_context=True, context=context)
-                else:
-                    result = checker.check_approval(question, answer, use_context=False)
+                completed_count = 0
+                with ThreadPoolExecutor(max_workers=args.threads) as executor:
+                    future_to_question = {executor.submit(process_approval_check, arg): arg[0] for arg in approval_args}
 
-                if result["status"] == "PASS":
-                    db.update_approval_status(question_id, True)
-                    if args.verbose:
-                        print(f"[VERBOSE] Question {question_id} approved", file=sys.stderr)
-                elif result["status"] == "REJECT":
-                    rejection_reason = result.get('message', 'No reason provided')
-                    db.update_approval_status(question_id, False, rejection_reason)
-                    if args.verbose:
-                        print(f"[VERBOSE] Question {question_id} rejected: {rejection_reason}", file=sys.stderr)
-                elif result["status"] == "CHANGE":
-                    # Handle missing keys gracefully - only update what's provided
-                    new_question = result.get("question", question)  # Use original if not provided
-                    new_answer = result.get("answer", answer)        # Use original if not provided
-
-                    # Update the question and answer in database
-                    db.update_question_and_answer(question_id, new_question, new_answer)
-                    # Mark as unprocessed so it goes through approval again
-                    db.mark_as_unprocessed(question_id)
-                    changes_made += 1
-                    if args.verbose:
-                        print(f"[VERBOSE] Question {question_id} changed: {result.get('justification', 'No justification provided')}", file=sys.stderr)
+                    for future in as_completed(future_to_question):
+                        question_id = future_to_question[future]
+                        try:
+                            result = future.result()
+                            if result["status"] == "CHANGE":
+                                changes_made += 1
+                            completed_count += 1
+                            print(f"Processed approval {completed_count}/{total_pairs}")
+                        except Exception as exc:
+                            print(f"Approval for question {question_id} generated an exception: {exc}")
+            else:
+                # Sequential processing using the same helper function
+                for i, arg in enumerate(approval_args, 1):
+                    question_id = arg[0]
+                    print(f"Processing approval {i}/{total_pairs}...")
+                    try:
+                        result = process_approval_check(arg)
+                        if result["status"] == "CHANGE":
+                            changes_made += 1
+                    except Exception as exc:
+                        print(f"Approval for question {question_id} generated an exception: {exc}")
 
             print(f"Completed approval iteration {iteration}: {changes_made} pairs were changed and will be re-processed")
             iteration += 1
