@@ -185,46 +185,105 @@ For changes:
             return {"status": "REJECT", "message": f"Failed to parse approval response: {str(e)}"}
 
     def check_approval(self, question: str, answer: str, use_context: bool = False, context: Optional[str] = None) -> dict:
-        """Check approval with optional context information"""
-        for i, prompt_item in enumerate(self.approval_prompts):
-            if isinstance(prompt_item, list):
-                # Conditional prompt array
-                if len(prompt_item) == 0:
-                    continue
+        """Check approval with optional context information and handle multiple passes in-memory"""
+        current_question = question
+        current_answer = answer
+        max_passes = 3
+        pass_count = 0
 
-                # First prompt is YES/NO gate
-                gate_prompt = prompt_item[0]
-                self._log_verbose(f"Processing conditional prompt group {i+1}: checking gate condition")
+        while pass_count < max_passes:
+            pass_count += 1
+            self._log_verbose(f"Starting approval pass {pass_count} for question")
 
-                should_process = self._check_yes_no_prompt(gate_prompt, question, answer)
+            changes_made_in_pass = False
 
-                if not should_process:
-                    self._log_verbose(f"Gate condition returned NO, skipping remaining prompts in group {i+1}")
-                    continue  # Skip to next prompt group
+            for i, prompt_item in enumerate(self.approval_prompts):
+                if isinstance(prompt_item, list):
+                    # Conditional prompt array
+                    if len(prompt_item) == 0:
+                        continue
 
-                self._log_verbose(f"Gate condition returned YES, processing {len(prompt_item)-1} conditional prompts")
+                    # First prompt is YES/NO gate
+                    gate_prompt = prompt_item[0]
+                    self._log_verbose(f"Processing conditional prompt group {i+1}: checking gate condition (pass {pass_count})")
 
-                # Process remaining prompts in the array
-                for j, conditional_prompt in enumerate(prompt_item[1:], 1):
-                    self._log_verbose(f"Processing conditional prompt {i+1}.{j}")
-                    result = self._check_single_prompt(conditional_prompt, question, answer, use_context, context)
+                    should_process = self._check_yes_no_prompt(gate_prompt, current_question, current_answer)
 
-                    if result["status"] != "PASS":
+                    if not should_process:
+                        self._log_verbose(f"Gate condition returned NO, skipping remaining prompts in group {i+1}")
+                        continue  # Skip to next prompt group
+
+                    self._log_verbose(f"Gate condition returned YES, processing {len(prompt_item)-1} conditional prompts")
+
+                    # Process remaining prompts in the array
+                    for j, conditional_prompt in enumerate(prompt_item[1:], 1):
+                        self._log_verbose(f"Processing conditional prompt {i+1}.{j} (pass {pass_count})")
+                        result = self._check_single_prompt(conditional_prompt, current_question, current_answer, use_context, context)
+
+                        if result["status"] == "REJECT":
+                            # Add prompt context to rejection reason
+                            if "message" in result:
+                                result["message"] = f"Pass {pass_count}, Conditional prompt {i+1}.{j}: {result['message']}"
+                            return result  # Return REJECT immediately
+                        elif result["status"] == "CHANGE":
+                            # Update current question/answer and continue with remaining prompts
+                            if "question" in result:
+                                current_question = result["question"]
+                            if "answer" in result:
+                                current_answer = result["answer"]
+                            changes_made_in_pass = True
+                            self._log_verbose(f"Question/answer changed by conditional prompt {i+1}.{j}, continuing with remaining prompts")
+
+                else:
+                    # Regular single prompt
+                    self._log_verbose(f"Processing single prompt {i+1} (pass {pass_count})")
+                    result = self._check_single_prompt(prompt_item, current_question, current_answer, use_context, context)
+
+                    if result["status"] == "REJECT":
                         # Add prompt context to rejection reason
-                        if result["status"] == "REJECT" and "message" in result:
-                            result["message"] = f"Conditional prompt {i+1}.{j}: {result['message']}"
-                        return result  # Return REJECT or CHANGE immediately
+                        if "message" in result:
+                            result["message"] = f"Pass {pass_count}, Prompt {i+1}: {result['message']}"
+                        return result  # Return REJECT immediately
+                    elif result["status"] == "CHANGE":
+                        # Update current question/answer and continue with remaining prompts
+                        if "question" in result:
+                            current_question = result["question"]
+                        if "answer" in result:
+                            current_answer = result["answer"]
+                        changes_made_in_pass = True
+                        self._log_verbose(f"Question/answer changed by prompt {i+1}, continuing with remaining prompts")
 
-            else:
-                # Regular single prompt
-                self._log_verbose(f"Processing single prompt {i+1}")
-                result = self._check_single_prompt(prompt_item, question, answer, use_context, context)
+            # If no changes were made in this pass, we're done - return PASS
+            if not changes_made_in_pass:
+                self._log_verbose(f"No changes made in pass {pass_count}, returning PASS")
+                if current_question != question or current_answer != answer:
+                    # Return the final changed version
+                    return {
+                        "status": "CHANGE",
+                        "question": current_question,
+                        "answer": current_answer,
+                        "justification": f"Final approved version after {pass_count} passes"
+                    }
+                else:
+                    return {"status": "PASS"}
 
-                if result["status"] != "PASS":
-                    # Add prompt context to rejection reason
-                    if result["status"] == "REJECT" and "message" in result:
-                        result["message"] = f"Prompt {i+1}: {result['message']}"
-                    return result  # Return REJECT or CHANGE immediately
+            # If we've reached max passes, accept the changes and treat as PASS
+            if pass_count >= max_passes:
+                self._log_verbose(f"Reached maximum passes ({max_passes}), accepting changes")
+                return {
+                    "status": "CHANGE",
+                    "question": current_question,
+                    "answer": current_answer,
+                    "justification": f"Accepted after maximum {max_passes} passes to prevent infinite loops"
+                }
 
-        # If all prompts passed, return PASS
-        return {"status": "PASS"}
+            # Otherwise, continue to next pass with the changed question/answer
+            self._log_verbose(f"Changes made in pass {pass_count}, starting next pass")
+
+        # This should never be reached due to the max_passes check above, but just in case
+        return {
+            "status": "CHANGE",
+            "question": current_question,
+            "answer": current_answer,
+            "justification": f"Accepted after {pass_count} passes"
+        }

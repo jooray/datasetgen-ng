@@ -69,12 +69,13 @@ def process_approval_check(args):
             print(f"[VERBOSE] Question {question_id} rejected: {rejection_reason}", file=sys.stderr)
         return {"status": "REJECT", "question_id": question_id}
     elif result["status"] == "CHANGE":
+        # Update with final changed version and mark as approved
         new_question = result.get("question", question)
         new_answer = result.get("answer", answer)
         db.update_question_and_answer(question_id, new_question, new_answer)
-        db.mark_as_unprocessed(question_id)
+        db.update_approval_status(question_id, True)  # Mark as approved since changes were accepted
         if verbose:
-            print(f"[VERBOSE] Question {question_id} changed: {result.get('justification', 'No justification provided')}", file=sys.stderr)
+            print(f"[VERBOSE] Question {question_id} changed and approved: {result.get('justification', 'No justification provided')}", file=sys.stderr)
         return {"status": "CHANGE", "question_id": question_id}
 
 def main():
@@ -275,16 +276,14 @@ def main():
             vector_store=answer_gen.vector_store if args.with_context and answer_gen else None
         )
 
-        # Loop until all pairs are processed (handle CHANGE status that creates new unprocessed pairs)
-        iteration = 1
-        while True:
-            unprocessed = db.get_unprocessed_qa_pairs()
+        # Single pass processing - no more loops needed since ApprovalChecker handles iterations internally
+        unprocessed = db.get_unprocessed_qa_pairs()
 
-            if not unprocessed:
-                break
-
+        if not unprocessed:
+            print("No unprocessed question-answer pairs found")
+        else:
             total_pairs = len(unprocessed)
-            print(f"Approval iteration {iteration}: Found {total_pairs} unprocessed question-answer pairs")
+            print(f"Found {total_pairs} unprocessed question-answer pairs")
 
             # Prepare arguments for processing
             approval_args = [
@@ -292,7 +291,10 @@ def main():
                 for question_id, question, answer, context in unprocessed
             ]
 
-            changes_made = 0
+            approved_count = 0
+            rejected_count = 0
+            changed_count = 0
+
             if args.threads > 1:
                 print(f"Processing approvals in parallel with {args.threads} threads...")
 
@@ -304,38 +306,15 @@ def main():
                         question_id = future_to_question[future]
                         try:
                             result = future.result()
-                            if result["status"] == "CHANGE":
-                                changes_made += 1
+                            if result["status"] == "PASS":
+                                approved_count += 1
+                            elif result["status"] == "REJECT":
+                                rejected_count += 1
+                            elif result["status"] == "CHANGE":
+                                changed_count += 1
                             completed_count += 1
                             print(f"Processed approval {completed_count}/{total_pairs}")
                         except Exception as exc:
                             print(f"Approval for question {question_id} generated an exception: {exc}")
             else:
-                # Sequential processing using the same helper function
-                for i, arg in enumerate(approval_args, 1):
-                    question_id = arg[0]
-                    print(f"Processing approval {i}/{total_pairs}...")
-                    try:
-                        result = process_approval_check(arg)
-                        if result["status"] == "CHANGE":
-                            changes_made += 1
-                    except Exception as exc:
-                        print(f"Approval for question {question_id} generated an exception: {exc}")
-
-            print(f"Completed approval iteration {iteration}: {changes_made} pairs were changed and will be re-processed")
-            iteration += 1
-
-            # Safety check to prevent infinite loops
-            if iteration > 10:
-                print("Warning: Reached maximum approval iterations (10). Some pairs may still need processing.")
-                break
-
-        print(f"Completed approval processing after {iteration - 1} iterations")
-
-    if args.phase in ['4', 'all']:
-        print("Phase 4: Exporting dataset...")
-        approved_pairs = db.get_approved_qa_pairs()
-        DatasetExporter.export_to_jsonl(approved_pairs, args.output)
-
-if __name__ == "__main__":
-    main()
+                # Sequential processing using the same helper
