@@ -278,6 +278,7 @@ poetry run datasetgen --dataset dataset2.txt --phase addcontext --vector-store s
 
 # Then run different phases in parallel (in separate terminals)
 poetry run datasetgen --dataset dataset1.txt --phase 1 --threads 2 --vector-store shared_store --db shared.db
+poetry run datasetgen --dataset dataset2.txt --phase 1 --threads 2 --vector-store shared_store --db shared.db
 poetry run datasetgen --phase 2 --threads 4 --vector-store shared_store --db shared.db
 poetry run datasetgen --phase 3 --threads 3 --vector-store shared_store --db shared.db
 ```
