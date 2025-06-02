@@ -317,4 +317,33 @@ def main():
                         except Exception as exc:
                             print(f"Approval for question {question_id} generated an exception: {exc}")
             else:
-                # Sequential processing using the same helper
+                # Sequential processing using the same helper function
+                for i, arg in enumerate(approval_args, 1):
+                    question_id = arg[0]
+                    print(f"Processing approval {i}/{total_pairs}...")
+                    try:
+                        result = process_approval_check(arg)
+                        if result["status"] == "PASS":
+                            approved_count += 1
+                        elif result["status"] == "REJECT":
+                            rejected_count += 1
+                        elif result["status"] == "CHANGE":
+                            changed_count += 1
+                    except Exception as exc:
+                        print(f"Approval for question {question_id} generated an exception: {exc}")
+
+        print(f"Approval processing complete: {approved_count} approved, {rejected_count} rejected, {changed_count} changed")
+
+    if args.phase in ['4', 'all']:
+        print("Phase 4: Exporting dataset...")
+
+        exporter = DatasetExporter(
+            db_path=args.db,
+            output_path=args.output,
+            verbose=args.verbose
+        )
+        exporter.export()
+
+        print(f"Dataset exported to {args.output}")
+
+    print("Process complete")
